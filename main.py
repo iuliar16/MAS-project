@@ -7,6 +7,7 @@ GRID_SIZE = 10
 SEED = 42
 EMERGENCY_TIME = 10
 
+
 class MonitorAgent:
     def __init__(self, model, emergency_time_seconds):
         self.model = model
@@ -32,16 +33,58 @@ class EvacAgent(mesa.Agent):
     def __init__(self, model):
         super().__init__(model)
         self.emergency_triggered = False
+        self.direction = None
+
+    def pick_random_direction(self):
+        directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+        self.direction = self.random.choice(directions)
 
     def step(self):
-        neighbors = self.model.grid.get_neighborhood(
-            self.pos,
-            moore=False,
-            include_center=False,
-            radius=1,
-        )
-        new_pos = self.random.choice(neighbors)
-        self.model.grid.move_agent(self, new_pos)
+        # before emergency = random walking
+        if not self.emergency_triggered:
+            neighbors = self.model.grid.get_neighborhood(
+                self.pos,
+                moore=False,
+                include_center=False,
+                radius=1,
+            )
+            new_pos = self.random.choice(neighbors)
+            self.model.grid.move_agent(self, new_pos)
+            return
+
+        # after emergency = constant direction walking
+        if self.direction is None:
+            self.pick_random_direction()
+
+        # If the agent hits a wall, then he should pick a new direction
+        # Find a valid move direction
+        attempts = 0
+        while True:
+            x, y = self.pos
+            dx, dy = self.direction or (0, 0)
+            target = (x + dx, y + dy)
+
+            # valid cell
+            if not self.model.grid.out_of_bounds(target):
+                break
+
+            # Pick a new direction and retry
+            self.pick_random_direction()
+            attempts += 1
+
+            if attempts > 10:
+                # fallback to random walk if stuck
+                neighbors = self.model.grid.get_neighborhood(
+                    self.pos,
+                    moore=False,
+                    include_center=False,
+                    radius=1,
+                )
+                target = self.random.choice(neighbors)
+                break
+
+        # Move to the new position
+        self.model.grid.move_agent(self, target)
 
 
 class GridModel(mesa.Model):
