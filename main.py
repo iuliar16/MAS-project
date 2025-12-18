@@ -2,6 +2,7 @@ import time
 import mesa
 from mesa.visualization import SolaraViz, make_space_component
 
+
 NUM_AGENTS = 5
 GRID_SIZE = 10
 SEED = 42
@@ -34,10 +35,73 @@ class EvacAgent(mesa.Agent):
         super().__init__(model)
         self.emergency_triggered = False
         self.direction = None
+        self.evacuated = False
+
+    def get_visible_exits(self, radius=5):
+        visible_exits = []
+        x, y = self.pos
+        for exit_agent in self.model.exits:
+            ex, ey = exit_agent.pos
+            if abs(ex - x) <= radius and abs(ey - y) <= radius:
+                visible_exits.append(exit_agent)
+        return visible_exits
+
+    def closest_exit(self, exits):
+        x, y = self.pos
+        closest = min(exits, key=lambda e: abs(e.pos[0] - x) + abs(e.pos[1] - y))
+        return closest
+
+    def move_towards(self, target_pos):
+        x, y = self.pos
+        tx, ty = target_pos
+        dx = tx - x
+        dy = ty - y
+
+        move_options = []
+        if dx != 0:
+            move_options.append((x + (1 if dx > 0 else -1), y))
+        if dy != 0:
+            move_options.append((x, y + (1 if dy > 0 else -1)))
+
+        for nx, ny in move_options:
+            if not self.model.grid.out_of_bounds((nx, ny)) and len(
+                    self.model.grid.get_cell_list_contents((nx, ny))) == 0:
+                self.model.grid.move_agent(self, (nx, ny))
+                return True
+
+        return False
 
     def pick_random_direction(self):
         directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
         self.direction = self.random.choice(directions)
+
+    def best_free_step_towards_exit(self, exit_agent):
+        x, y = self.pos
+        tx, ty = exit_agent.pos
+
+        # Get all orthogonal neighbors
+        neighbors = [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
+
+        # Keep only neighbors that are inside the grid and free
+        free_neighbors = [
+            n for n in neighbors
+            if not self.model.grid.out_of_bounds(n)
+               and len(self.model.grid.get_cell_list_contents(n)) == 0
+        ]
+
+        if not free_neighbors:
+            return None  # all neighbors blocked
+
+        # Pick the neighbor that minimizes Manhattan distance to exit
+        best_cell = min(free_neighbors, key=lambda n: abs(n[0] - tx) + abs(n[1] - ty))
+        return best_cell
+
+    def check_exit(self):
+        for exit_agent in self.model.exits:
+            if self.pos == exit_agent.pos:
+                self.model.kill_agents.append(self)
+                return True
+        return False
 
     def step(self):
         # before emergency = random walking
@@ -49,12 +113,27 @@ class EvacAgent(mesa.Agent):
                 radius=1,
             )
             new_pos = self.random.choice(neighbors)
-            self.model.grid.move_agent(self, new_pos)
+            if len(self.model.grid.get_cell_list_contents(new_pos)) == 0:
+                self.model.grid.move_agent(self, new_pos)
+                self.check_exit()
             return
 
         # after emergency = constant direction walking
         if self.direction is None:
             self.pick_random_direction()
+
+        visible_exits = self.get_visible_exits(radius=5)
+        if visible_exits:
+            exit_agent = self.closest_exit(visible_exits)
+            moved = self.move_towards(exit_agent.pos)
+
+            # If direct path is blocked, try the best free step towards exit
+            if not moved:
+                target_cell = self.best_free_step_towards_exit(exit_agent)
+                if target_cell:
+                    self.model.grid.move_agent(self, target_cell)
+                    self.check_exit()
+            return
 
         # If the agent hits a wall, then he should pick a new direction
         # Find a valid move direction
@@ -64,8 +143,16 @@ class EvacAgent(mesa.Agent):
             dx, dy = self.direction or (0, 0)
             target = (x + dx, y + dy)
 
+            # Check for visible exits first
+            visible_exits = self.get_visible_exits(radius=5)
+            if visible_exits:
+                exit_agent = self.closest_exit(visible_exits)
+                target = self.next_step_towards(exit_agent.pos)  # minimal helper to get next step
+                if target and len(self.model.grid.get_cell_list_contents(target)) == 0:
+                    break
+
             # valid cell
-            if not self.model.grid.out_of_bounds(target):
+            if not self.model.grid.out_of_bounds(target) and len(self.model.grid.get_cell_list_contents(target)) == 0:
                 break
 
             # Pick a new direction and retry
@@ -80,12 +167,17 @@ class EvacAgent(mesa.Agent):
                     include_center=False,
                     radius=1,
                 )
-                target = self.random.choice(neighbors)
+                # choose a free neighbor if any
+                free_neighbors = [n for n in neighbors if len(self.model.grid.get_cell_list_contents(n)) == 0]
+                if free_neighbors:
+                    target = self.random.choice(free_neighbors)
+                else:
+                    target = self.pos  # stay in place
                 break
 
         # Move to the new position
         self.model.grid.move_agent(self, target)
-
+        self.check_exit()
 
 class GridModel(mesa.Model):
     def __init__(self, grid_size=GRID_SIZE, seed=SEED, emergency_time=EMERGENCY_TIME):
@@ -94,6 +186,7 @@ class GridModel(mesa.Model):
         self.grid = mesa.space.MultiGrid(grid_size, grid_size, torus=False)
         self.emergency = False
         self.start_time = time.time()
+        self.kill_agents = []
 
         self.monitor = MonitorAgent(self, emergency_time)
 
@@ -124,6 +217,11 @@ class GridModel(mesa.Model):
 
         for agent in self.agents:
             agent.step()
+
+        # Asta nu merge. Idk why -_-
+        for agent in self.kill_agents:
+            self.grid.remove_agent(agent)
+        self.kill_agents.clear()
 
 
 def agent_portrayal(agent):
