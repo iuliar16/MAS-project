@@ -3,7 +3,7 @@ import mesa
 from mesa.visualization import SolaraViz, make_space_component
 
 
-NUM_AGENTS = 5
+NUM_AGENTS = 10
 GRID_SIZE = 10
 SEED = 42
 EMERGENCY_TIME = 10
@@ -64,9 +64,14 @@ class EvacAgent(mesa.Agent):
             move_options.append((x, y + (1 if dy > 0 else -1)))
 
         for nx, ny in move_options:
-            if not self.model.grid.out_of_bounds((nx, ny)) and len(
-                    self.model.grid.get_cell_list_contents((nx, ny))) == 0:
+            if self.model.grid.out_of_bounds((nx, ny)):
+                continue
+
+            cell_contents = self.model.grid.get_cell_list_contents((nx, ny))
+
+            if len(cell_contents) == 0 or self.is_exit_cell((nx, ny)):
                 self.model.grid.move_agent(self, (nx, ny))
+                self.check_exit()
                 return True
 
         return False
@@ -96,10 +101,14 @@ class EvacAgent(mesa.Agent):
         best_cell = min(free_neighbors, key=lambda n: abs(n[0] - tx) + abs(n[1] - ty))
         return best_cell
 
+    def is_exit_cell(self, pos):
+        return any(exit_agent.pos == pos for exit_agent in self.model.exits)
+
     def check_exit(self):
         for exit_agent in self.model.exits:
             if self.pos == exit_agent.pos:
-                self.model.kill_agents.append(self)
+                self.model.grid.remove_agent(self)
+                self.model.agents.remove(self)
                 return True
         return False
 
@@ -115,7 +124,6 @@ class EvacAgent(mesa.Agent):
             new_pos = self.random.choice(neighbors)
             if len(self.model.grid.get_cell_list_contents(new_pos)) == 0:
                 self.model.grid.move_agent(self, new_pos)
-                self.check_exit()
             return
 
         # after emergency = constant direction walking
@@ -132,7 +140,6 @@ class EvacAgent(mesa.Agent):
                 target_cell = self.best_free_step_towards_exit(exit_agent)
                 if target_cell:
                     self.model.grid.move_agent(self, target_cell)
-                    self.check_exit()
             return
 
         # If the agent hits a wall, then he should pick a new direction
@@ -177,7 +184,6 @@ class EvacAgent(mesa.Agent):
 
         # Move to the new position
         self.model.grid.move_agent(self, target)
-        self.check_exit()
 
 class GridModel(mesa.Model):
     def __init__(self, grid_size=GRID_SIZE, seed=SEED, emergency_time=EMERGENCY_TIME):
@@ -186,9 +192,16 @@ class GridModel(mesa.Model):
         self.grid = mesa.space.MultiGrid(grid_size, grid_size, torus=False)
         self.emergency = False
         self.start_time = time.time()
-        self.kill_agents = []
 
         self.monitor = MonitorAgent(self, emergency_time)
+
+        self.exits = []
+
+        exit_positions = [(0, 0), (grid_size - 1, grid_size - 1)]
+        for pos in exit_positions:
+            exit_agent = ExitAgent(self)
+            self.grid.place_agent(exit_agent, pos)
+            self.exits.append(exit_agent)
 
         # Create evac agents
         for _ in range(NUM_AGENTS):
@@ -202,26 +215,14 @@ class GridModel(mesa.Model):
             agent = EvacAgent(self)
             self.grid.place_agent(agent, init_pos)
 
-            self.exits = []
-
-            exit_positions = [(0, 0), (grid_size - 1, grid_size - 1)]
-            for pos in exit_positions:
-                exit_agent = ExitAgent(self)
-                self.grid.place_agent(exit_agent, pos)
-                self.exits.append(exit_agent)
-
 
     def step(self):
         # Monitor checks if 10 seconds passed to give the alarm
         self.monitor.step()
 
-        for agent in self.agents:
+        for agent in list(self.agents):
             agent.step()
 
-        # Asta nu merge. Idk why -_-
-        for agent in self.kill_agents:
-            self.grid.remove_agent(agent)
-        self.kill_agents.clear()
 
 
 def agent_portrayal(agent):
