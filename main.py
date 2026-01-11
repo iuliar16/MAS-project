@@ -23,7 +23,7 @@ class MonitorAgent:
             self.model.emergency = True
 
             # notify all evac agents after 10 seconds
-            for agent in self.model.agents:
+            for agent in self.model.active_agents:
                 agent.emergency_triggered = True
 
 class ExitAgent(mesa.Agent):
@@ -37,7 +37,13 @@ class EvacAgent(mesa.Agent):
         self.direction = None
         self.evacuated = False
 
-    def get_visible_exits(self, radius=5):
+        self.state = "HELP"
+        self.following_agent = None
+        self.follow_start_time = 0
+        self.asked_memory = {}
+
+
+    def get_visible_exits(self, radius=3):
         visible_exits = []
         x, y = self.pos
         for exit_agent in self.model.exits:
@@ -101,6 +107,24 @@ class EvacAgent(mesa.Agent):
         best_cell = min(free_neighbors, key=lambda n: abs(n[0] - tx) + abs(n[1] - ty))
         return best_cell
 
+    def next_step_towards(self, target_pos):
+        x, y = self.pos
+        tx, ty = target_pos
+        options = []
+        if tx > x:
+            options.append((x + 1, y))
+        elif tx < x:
+            options.append((x - 1, y))
+        if ty > y:
+            options.append((x, y + 1))
+        elif ty < y:
+            options.append((x, y - 1))
+
+        for op in options:
+            if not self.model.grid.out_of_bounds(op) and len(self.model.grid.get_cell_list_contents(op)) == 0:
+                return op
+        return None
+
     def is_exit_cell(self, pos):
         return any(exit_agent.pos == pos for exit_agent in self.model.exits)
 
@@ -108,9 +132,44 @@ class EvacAgent(mesa.Agent):
         for exit_agent in self.model.exits:
             if self.pos == exit_agent.pos:
                 self.model.grid.remove_agent(self)
-                self.model.agents.remove(self)
+                if self in self.model.active_agents:
+                    self.model.active_agents.remove(self)
                 return True
         return False
+
+    def ask_neighbors(self):
+        neighbors = self.model.grid.get_neighbors(self.pos, moore=True, radius=5, include_center=False)
+        current_time = time.time()
+        COOLDOWN = 3.0  # nu intrebam acelasi agent timp de 3 secunde
+
+        for neighbor in neighbors:
+            if isinstance(neighbor, EvacAgent) and neighbor in self.model.active_agents:
+                last_asked = self.asked_memory.get(neighbor, 0)
+                if current_time - last_asked > COOLDOWN:
+
+                    self.asked_memory[neighbor] = current_time
+
+                    if neighbor.get_visible_exits():
+                        return neighbor
+        return None
+
+    def do_random_constant_move(self):
+        # after emergency = constant walking
+        if self.direction is None:
+            self.pick_random_direction()
+
+        dx, dy = self.direction
+        target = (self.pos[0] + dx, self.pos[1] + dy)
+
+        moved = False
+        if not self.model.grid.out_of_bounds(target):
+            if len(self.model.grid.get_cell_list_contents(target)) == 0:
+                self.model.grid.move_agent(self, target)
+                moved = True
+
+        if not moved:
+            # if hit a wall or agent, change direction
+            self.pick_random_direction()
 
     def step(self):
         # before emergency = random walking
@@ -121,17 +180,25 @@ class EvacAgent(mesa.Agent):
                 include_center=False,
                 radius=1,
             )
-            new_pos = self.random.choice(neighbors)
-            if len(self.model.grid.get_cell_list_contents(new_pos)) == 0:
-                self.model.grid.move_agent(self, new_pos)
+            valid = [n for n in neighbors if not self.model.grid.get_cell_list_contents(n)]
+            if valid:
+                self.model.grid.move_agent(self, self.random.choice(valid))
             return
 
-        # after emergency = constant direction walking
-        if self.direction is None:
-            self.pick_random_direction()
-
-        visible_exits = self.get_visible_exits(radius=5)
+        visible_exits = self.get_visible_exits()
         if visible_exits:
+            self.state = "EVACUATING"
+            self.following_agent = None
+
+        if self.state == "FOLLOWING":
+            if time.time() - self.follow_start_time > 10:
+                self.state = "HELP"
+                self.following_agent = None
+            elif self.following_agent not in self.model.active_agents:  # if the guide has exited
+                self.state = "HELP"
+                self.following_agent = None
+
+        if self.state == "EVACUATING":
             exit_agent = self.closest_exit(visible_exits)
             moved = self.move_towards(exit_agent.pos)
 
@@ -140,50 +207,23 @@ class EvacAgent(mesa.Agent):
                 target_cell = self.best_free_step_towards_exit(exit_agent)
                 if target_cell:
                     self.model.grid.move_agent(self, target_cell)
-            return
-
-        # If the agent hits a wall, then he should pick a new direction
-        # Find a valid move direction
-        attempts = 0
-        while True:
-            x, y = self.pos
-            dx, dy = self.direction or (0, 0)
-            target = (x + dx, y + dy)
-
-            # Check for visible exits first
-            visible_exits = self.get_visible_exits(radius=5)
-            if visible_exits:
-                exit_agent = self.closest_exit(visible_exits)
-                target = self.next_step_towards(exit_agent.pos)  # minimal helper to get next step
-                if target and len(self.model.grid.get_cell_list_contents(target)) == 0:
-                    break
-
-            # valid cell
-            if not self.model.grid.out_of_bounds(target) and len(self.model.grid.get_cell_list_contents(target)) == 0:
-                break
-
-            # Pick a new direction and retry
-            self.pick_random_direction()
-            attempts += 1
-
-            if attempts > 10:
-                # fallback to random walk if stuck
-                neighbors = self.model.grid.get_neighborhood(
-                    self.pos,
-                    moore=False,
-                    include_center=False,
-                    radius=1,
-                )
-                # choose a free neighbor if any
-                free_neighbors = [n for n in neighbors if len(self.model.grid.get_cell_list_contents(n)) == 0]
-                if free_neighbors:
-                    target = self.random.choice(free_neighbors)
+                    self.check_exit()
+        elif self.state == "FOLLOWING":
+            if self.following_agent and self.following_agent.pos:
+                dist = abs(self.following_agent.pos[0] - self.pos[0]) + abs(self.following_agent.pos[1] - self.pos[1])
+                if dist <= 5:
+                    self.move_towards(self.following_agent.pos)
                 else:
-                    target = self.pos  # stay in place
-                break
+                    self.state = "HELP"
 
-        # Move to the new position
-        self.model.grid.move_agent(self, target)
+        elif self.state == "HELP":
+            guide = self.ask_neighbors()
+            if guide:
+                self.state = "FOLLOWING"
+                self.following_agent = guide
+                self.follow_start_time = time.time()
+            else:
+                self.do_random_constant_move()
 
 class GridModel(mesa.Model):
     def __init__(self, grid_size=GRID_SIZE, seed=SEED, emergency_time=EMERGENCY_TIME):
@@ -192,7 +232,7 @@ class GridModel(mesa.Model):
         self.grid = mesa.space.MultiGrid(grid_size, grid_size, torus=False)
         self.emergency = False
         self.start_time = time.time()
-
+        self.active_agents = []
         self.monitor = MonitorAgent(self, emergency_time)
 
         self.exits = []
@@ -210,19 +250,19 @@ class GridModel(mesa.Model):
                 for (cell_content, (x, y)) in self.grid.coord_iter()
                 if len(cell_content) == 0
             ]
-            init_pos = self.random.choice(empty_cells)
-
-            agent = EvacAgent(self)
-            self.grid.place_agent(agent, init_pos)
+            if empty_cells:
+                init_pos = self.random.choice(empty_cells)
+                agent = EvacAgent(self)
+                self.grid.place_agent(agent, init_pos)
+                self.active_agents.append(agent)
 
 
     def step(self):
         # Monitor checks if 10 seconds passed to give the alarm
         self.monitor.step()
 
-        for agent in list(self.agents):
+        for agent in list(self.active_agents):
             agent.step()
-
 
 
 def agent_portrayal(agent):
@@ -233,8 +273,16 @@ def agent_portrayal(agent):
             "marker": "s",
         }
     if isinstance(agent, EvacAgent):
+        color = "blue"
+        if agent.emergency_triggered:
+            if agent.state == "FOLLOWING":
+                color = "yellow"
+            elif agent.state == "EVACUATING":
+                color = "red"
+            else:
+                color = "orange"
         return {
-            "color": "red" if agent.emergency_triggered else "blue",
+            "color": color,
             "size": 100,
             "marker": "o",
         }
