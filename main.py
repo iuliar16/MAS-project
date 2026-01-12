@@ -4,7 +4,7 @@ from mesa.visualization import SolaraViz, make_space_component
 
 
 NUM_AGENTS = 10
-GRID_SIZE = 10
+GRID_SIZE = 12
 SEED = 42
 EMERGENCY_TIME = 10
 
@@ -43,7 +43,7 @@ class EvacAgent(mesa.Agent):
         self.asked_memory = {}
 
 
-    def get_visible_exits(self, radius=3):
+    def get_visible_exits(self, radius=4):
         visible_exits = []
         x, y = self.pos
         for exit_agent in self.model.exits:
@@ -232,12 +232,24 @@ class GridModel(mesa.Model):
         self.grid = mesa.space.MultiGrid(grid_size, grid_size, torus=False)
         self.emergency = False
         self.start_time = time.time()
+        self.evac_start_time = 0
         self.active_agents = []
         self.monitor = MonitorAgent(self, emergency_time)
-
+        self.running = True
         self.exits = []
 
+        #Option 1: Colturi opuse
         exit_positions = [(0, 0), (grid_size - 1, grid_size - 1)]
+
+        #Option 2: Mijlocul laturilor (stg, drt)
+        #exit_positions = [(0, grid_size // 2), (grid_size - 1, grid_size // 2)]
+
+        #Option 3: Colturi adiacente (aceeasi latura)
+        #exit_positions = [(0, 0), (grid_size - 1, 0)]
+
+        #Option 4: O singura iesire (Centru)
+        #exit_positions = [(grid_size // 2, grid_size // 2)]
+
         for pos in exit_positions:
             exit_agent = ExitAgent(self)
             self.grid.place_agent(exit_agent, pos)
@@ -261,9 +273,17 @@ class GridModel(mesa.Model):
         # Monitor checks if 10 seconds passed to give the alarm
         self.monitor.step()
 
+        if self.emergency and self.evac_start_time == 0:
+            self.evac_start_time = time.time()
+
         for agent in list(self.active_agents):
             agent.step()
 
+        if self.emergency and len(self.active_agents) == 0:
+            self.running = False
+            end_time = time.time()
+            duration = end_time - self.evac_start_time
+            print(f"Evacuation time: {duration:.2f} s")
 
 def agent_portrayal(agent):
     if isinstance(agent, ExitAgent):
