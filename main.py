@@ -9,8 +9,9 @@ SEED = 42
 EMERGENCY_TIME = 10
 
 
-class MonitorAgent:
+class MonitorAgent(mesa.Agent):
     def __init__(self, model, emergency_time_seconds):
+        super().__init__(model)
         self.model = model
         self.emergency_time = emergency_time_seconds
         self.emergency_triggered = False
@@ -18,6 +19,7 @@ class MonitorAgent:
     def step(self):
         elapsed = time.time() - self.model.start_time
 
+        # If emergency hasn’t been triggered yet and enough seconds passed, mark monitor as triggered
         if not self.emergency_triggered and elapsed >= self.emergency_time:
             self.emergency_triggered = True
             self.model.emergency = True
@@ -34,15 +36,19 @@ class EvacAgent(mesa.Agent):
     def __init__(self, model):
         super().__init__(model)
         self.emergency_triggered = False
+        # direction is used for constant walking before emergency
         self.direction = None
-        self.evacuated = False
 
         self.state = "HELP"
+
+        # reference to the guide agent being followed.
         self.following_agent = None
+        # used to stop following after 10 seconds.
         self.follow_start_time = 0
+        # dictionary to track who you recently asked
         self.asked_memory = {}
 
-
+    # function used to loop over exits and see if they are in the agent radius (if they are close)
     def get_visible_exits(self, radius=3):
         visible_exits = []
         x, y = self.pos
@@ -52,17 +58,21 @@ class EvacAgent(mesa.Agent):
                 visible_exits.append(exit_agent)
         return visible_exits
 
+    # function that returns the closest exit by Manhattan distance (|dx| + |dy|).
+    # returns the exit with smallest computed distance
     def closest_exit(self, exits):
         x, y = self.pos
         closest = min(exits, key=lambda e: abs(e.pos[0] - x) + abs(e.pos[1] - y))
         return closest
 
     def move_towards(self, target_pos):
+        # computes direction deltas from current position to target
         x, y = self.pos
         tx, ty = target_pos
         dx = tx - x
         dy = ty - y
 
+        # Builds up to two candidate next positions: one step closer in x or/and one step closer in y
         move_options = []
         if dx != 0:
             move_options.append((x + (1 if dx > 0 else -1), y))
@@ -70,9 +80,11 @@ class EvacAgent(mesa.Agent):
             move_options.append((x, y + (1 if dy > 0 else -1)))
 
         for nx, ny in move_options:
+            # skip candidate if it’s outside the grid
             if self.model.grid.out_of_bounds((nx, ny)):
                 continue
 
+            # Get agents currently in that cell and if the cell is empty or its an exit cell, allow moving there
             cell_contents = self.model.grid.get_cell_list_contents((nx, ny))
 
             if len(cell_contents) == 0 or self.is_exit_cell((nx, ny)):
@@ -86,6 +98,7 @@ class EvacAgent(mesa.Agent):
         directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
         self.direction = self.random.choice(directions)
 
+    # Calculate a fallback move when direct move is blocked
     def best_free_step_towards_exit(self, exit_agent):
         x, y = self.pos
         tx, ty = exit_agent.pos
@@ -107,27 +120,11 @@ class EvacAgent(mesa.Agent):
         best_cell = min(free_neighbors, key=lambda n: abs(n[0] - tx) + abs(n[1] - ty))
         return best_cell
 
-    def next_step_towards(self, target_pos):
-        x, y = self.pos
-        tx, ty = target_pos
-        options = []
-        if tx > x:
-            options.append((x + 1, y))
-        elif tx < x:
-            options.append((x - 1, y))
-        if ty > y:
-            options.append((x, y + 1))
-        elif ty < y:
-            options.append((x, y - 1))
-
-        for op in options:
-            if not self.model.grid.out_of_bounds(op) and len(self.model.grid.get_cell_list_contents(op)) == 0:
-                return op
-        return None
-
+    # Checks if pos equals the position of any exit
     def is_exit_cell(self, pos):
         return any(exit_agent.pos == pos for exit_agent in self.model.exits)
 
+    # if evac agent is on an exit remove it from the grid
     def check_exit(self):
         for exit_agent in self.model.exits:
             if self.pos == exit_agent.pos:
@@ -144,11 +141,12 @@ class EvacAgent(mesa.Agent):
 
         for neighbor in neighbors:
             if isinstance(neighbor, EvacAgent) and neighbor in self.model.active_agents:
+                # if never asked, treat last asked as time 0
                 last_asked = self.asked_memory.get(neighbor, 0)
                 if current_time - last_asked > COOLDOWN:
-
+                    # Store that we asked this neighbor now
                     self.asked_memory[neighbor] = current_time
-
+                    # If the neighbor can see an exit then he will be the guide
                     if neighbor.get_visible_exits():
                         return neighbor
         return None
@@ -180,16 +178,19 @@ class EvacAgent(mesa.Agent):
                 include_center=False,
                 radius=1,
             )
+            # get empty neighbor cells - if any, move to a random empty neighbor
             valid = [n for n in neighbors if not self.model.grid.get_cell_list_contents(n)]
             if valid:
                 self.model.grid.move_agent(self, self.random.choice(valid))
             return
 
         visible_exits = self.get_visible_exits()
+        # if agent can see exits, change state to Evacuating and stop following anyone
         if visible_exits:
             self.state = "EVACUATING"
             self.following_agent = None
-
+        # If agent is following, then stop after 10 seconds of following (becomes HELP again)
+        # or stop if the guide already exited (no longer active)
         if self.state == "FOLLOWING":
             if time.time() - self.follow_start_time > 10:
                 self.state = "HELP"
@@ -198,6 +199,7 @@ class EvacAgent(mesa.Agent):
                 self.state = "HELP"
                 self.following_agent = None
 
+        # if state is Evacuating, then move to the closest exist
         if self.state == "EVACUATING":
             exit_agent = self.closest_exit(visible_exits)
             moved = self.move_towards(exit_agent.pos)
@@ -208,6 +210,10 @@ class EvacAgent(mesa.Agent):
                 if target_cell:
                     self.model.grid.move_agent(self, target_cell)
                     self.check_exit()
+
+        # If following someone, compute distance to them
+        # if within 5 cells, move toward them
+        # if too far, give up and revert to HELP
         elif self.state == "FOLLOWING":
             if self.following_agent and self.following_agent.pos:
                 dist = abs(self.following_agent.pos[0] - self.pos[0]) + abs(self.following_agent.pos[1] - self.pos[1])
@@ -216,8 +222,10 @@ class EvacAgent(mesa.Agent):
                 else:
                     self.state = "HELP"
 
+        # if state is help, try to find a guide by asking neighbors
         elif self.state == "HELP":
             guide = self.ask_neighbors()
+            # if we found a guide, remember who it is and store follow start time
             if guide:
                 self.state = "FOLLOWING"
                 self.following_agent = guide
@@ -310,7 +318,7 @@ if __name__ == "__main__":
         model=model,
         components=[grid_component],
         model_params=model_params,
-        name="Evacuation – 10s Emergency (No Scheduler)",
+        name="Evacuation Emergency Model",
     )
 
     page
