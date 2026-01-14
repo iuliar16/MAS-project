@@ -7,6 +7,7 @@ NUM_AGENTS = 10
 GRID_SIZE = 10
 SEED = 42
 EMERGENCY_TIME = 10
+FOLLOW_LIMIT_STEPS = 20
 
 class MonitorAgent(mesa.Agent):
     def __init__(self, model, emergency_time_seconds):
@@ -43,7 +44,7 @@ class EvacAgent(mesa.Agent):
         # reference to the guide agent being followed.
         self.following_agent = None
         # used to stop following after 10 seconds.
-        self.follow_start_time = 0
+        self.follow_start_step = 0
         # dictionary to track who you recently asked
         self.asked_memory = {}
 
@@ -136,15 +137,15 @@ class EvacAgent(mesa.Agent):
     def ask_neighbors(self):
         neighbors = self.model.grid.get_neighbors(self.pos, moore=True, radius=5, include_center=False)
         current_time = time.time()
-        COOLDOWN = 3.0  # nu intrebam acelasi agent timp de 3 secunde
+        COOLDOWN_STEPS = 5  # nu intrebam acelasi agent timp de 5 pasi
 
         for neighbor in neighbors:
             if isinstance(neighbor, EvacAgent) and neighbor in self.model.active_agents:
-                # if never asked, treat last asked as time 0
-                last_asked = self.asked_memory.get(neighbor, 0)
-                if current_time - last_asked > COOLDOWN:
+                # if never asked, treat last asked as step -10*9
+                last_asked_step = self.asked_memory.get(neighbor, -10**9)
+                if self.model.step_count - last_asked_step > COOLDOWN_STEPS:
                     # Store that we asked this neighbor now
-                    self.asked_memory[neighbor] = current_time
+                    self.asked_memory[neighbor] =  self.model.step_count
                     # If the neighbor can see an exit then he will be the guide
                     if neighbor.get_visible_exits():
                         return neighbor
@@ -188,10 +189,10 @@ class EvacAgent(mesa.Agent):
         if visible_exits:
             self.state = "EVACUATING"
             self.following_agent = None
-        # If agent is following, then stop after 10 seconds of following (becomes HELP again)
+        # If agent is following, then stop after 20 steps of following (becomes HELP again)
         # or stop if the guide already exited (no longer active)
         if self.state == "FOLLOWING":
-            if time.time() - self.follow_start_time > 10:
+            if self.model.step_count - self.follow_start_step > FOLLOW_LIMIT_STEPS:
                 self.state = "HELP"
                 self.following_agent = None
             elif self.following_agent not in self.model.active_agents:  # if the guide has exited
@@ -233,7 +234,7 @@ class EvacAgent(mesa.Agent):
             if guide:
                 self.state = "FOLLOWING"
                 self.following_agent = guide
-                self.follow_start_time = time.time()
+                self.follow_start_step = self.model.step_count
             else:
                 self.do_random_constant_move()
 
