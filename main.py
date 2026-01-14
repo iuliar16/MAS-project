@@ -8,7 +8,6 @@ GRID_SIZE = 10
 SEED = 42
 EMERGENCY_TIME = 10
 
-
 class MonitorAgent(mesa.Agent):
     def __init__(self, model, emergency_time_seconds):
         super().__init__(model)
@@ -201,6 +200,11 @@ class EvacAgent(mesa.Agent):
 
         # if state is Evacuating, then move to the closest exist
         if self.state == "EVACUATING":
+            if not visible_exits:
+                self.state = "HELP"
+                self.following_agent = None
+                self.do_random_constant_move()
+                return
             exit_agent = self.closest_exit(visible_exits)
             moved = self.move_towards(exit_agent.pos)
 
@@ -234,7 +238,7 @@ class EvacAgent(mesa.Agent):
                 self.do_random_constant_move()
 
 class GridModel(mesa.Model):
-    def __init__(self, grid_size=GRID_SIZE, seed=SEED, emergency_time=EMERGENCY_TIME):
+    def __init__(self, grid_size=GRID_SIZE, seed=SEED, emergency_time=EMERGENCY_TIME, exit_positions = None):
         super().__init__(seed=seed)
 
         self.grid = mesa.space.MultiGrid(grid_size, grid_size, torus=False)
@@ -246,17 +250,12 @@ class GridModel(mesa.Model):
         self.running = True
         self.exits = []
 
-        #Option 1: Colturi opuse
-        exit_positions = [(0, 0), (grid_size - 1, grid_size - 1)]
+        self.step_count = 0
+        self.evac_start_step = None
+        self.evac_end_step = None
 
-        #Option 2: Mijlocul laturilor (stg, drt)
-        #exit_positions = [(0, grid_size // 2), (grid_size - 1, grid_size // 2)]
-
-        #Option 3: Colturi adiacente (aceeasi latura)
-        #exit_positions = [(0, 0), (grid_size - 1, 0)]
-
-        #Option 4: O singura iesire (Centru)
-        #exit_positions = [(grid_size // 2, grid_size // 2)]
+        if exit_positions is None:
+            exit_positions = [(0, 0), (grid_size - 1, grid_size - 1)]
 
         for pos in exit_positions:
             exit_agent = ExitAgent(self)
@@ -276,22 +275,26 @@ class GridModel(mesa.Model):
                 self.grid.place_agent(agent, init_pos)
                 self.active_agents.append(agent)
 
+    def get_evacuation_steps(self):
+        if self.evac_start_step is None or self.evac_end_step is None:
+            return None
+        return self.evac_end_step - self.evac_start_step
 
     def step(self):
+        self.step_count += 1
         # Monitor checks if 10 seconds passed to give the alarm
         self.monitor.step()
 
-        if self.emergency and self.evac_start_time == 0:
-            self.evac_start_time = time.time()
+        if self.emergency and self.evac_start_step is None:
+            self.evac_start_step  = self.step_count
 
         for agent in list(self.active_agents):
             agent.step()
 
         if self.emergency and len(self.active_agents) == 0:
             self.running = False
-            end_time = time.time()
-            duration = end_time - self.evac_start_time
-            print(f"Evacuation time: {duration:.2f} s")
+            self.evac_end_step = self.step_count
+
 
 def agent_portrayal(agent):
     if isinstance(agent, ExitAgent):
