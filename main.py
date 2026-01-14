@@ -3,7 +3,7 @@ import mesa
 from mesa.visualization import SolaraViz, make_space_component
 
 
-NUM_AGENTS = 10
+NUM_AGENTS = 15
 GRID_SIZE = 10
 SEED = 42
 EMERGENCY_TIME = 10
@@ -110,7 +110,7 @@ class EvacAgent(mesa.Agent):
         free_neighbors = [
             n for n in neighbors
             if not self.model.grid.out_of_bounds(n)
-               and len(self.model.grid.get_cell_list_contents(n)) == 0
+               and (len(self.model.grid.get_cell_list_contents(n)) == 0 or self.is_exit_cell(n))
         ]
 
         if not free_neighbors:
@@ -153,21 +153,27 @@ class EvacAgent(mesa.Agent):
 
     def do_random_constant_move(self):
         # after emergency = constant walking
+        directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
         if self.direction is None:
-            self.pick_random_direction()
+            self.direction = self.random.choice(directions)
 
-        dx, dy = self.direction
-        target = (self.pos[0] + dx, self.pos[1] + dy)
+        self.random.shuffle(directions)
 
-        moved = False
-        if not self.model.grid.out_of_bounds(target):
+        # Try current direction first, then others
+        candidate_dirs = [self.direction] + [d for d in directions if d != self.direction]
+
+        for dx, dy in candidate_dirs:
+            target = (self.pos[0] + dx, self.pos[1] + dy)
+
+            if self.model.grid.out_of_bounds(target):
+                continue
+
             if len(self.model.grid.get_cell_list_contents(target)) == 0:
+                self.direction = (dx, dy)  # keep the direction that worked
                 self.model.grid.move_agent(self, target)
-                moved = True
+                # If no move possible, keep direction but don't move
+                return
 
-        if not moved:
-            # if hit a wall or agent, change direction
-            self.pick_random_direction()
 
     def step(self):
         # before emergency = random walking
@@ -222,10 +228,19 @@ class EvacAgent(mesa.Agent):
         elif self.state == "FOLLOWING":
             if self.following_agent and self.following_agent.pos:
                 dist = abs(self.following_agent.pos[0] - self.pos[0]) + abs(self.following_agent.pos[1] - self.pos[1])
+
                 if dist <= 5:
                     self.move_towards(self.following_agent.pos)
                 else:
+                    # guide no longer in view, then stop following AND keep moving
                     self.state = "HELP"
+                    self.following_agent = None
+                    self.do_random_constant_move()
+            else:
+                # guide disappeared for some reason
+                self.state = "HELP"
+                self.following_agent = None
+                self.do_random_constant_move()
 
         # if state is help, try to find a guide by asking neighbors
         elif self.state == "HELP":
@@ -235,8 +250,12 @@ class EvacAgent(mesa.Agent):
                 self.state = "FOLLOWING"
                 self.following_agent = guide
                 self.follow_start_step = self.model.step_count
+
+                # move immediately toward guide
+                self.move_towards(guide.pos)
             else:
                 self.do_random_constant_move()
+
 
 class GridModel(mesa.Model):
     def __init__(self, grid_size=GRID_SIZE, seed=SEED, emergency_time=EMERGENCY_TIME, exit_positions = None):
